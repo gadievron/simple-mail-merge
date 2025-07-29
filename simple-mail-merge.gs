@@ -5,7 +5,7 @@
  * 
  * Gmail mail merge solution for Google Sheets.
  * 
- * @author Gadi Evron (with Claude)
+ * @author Gadi Evron (with Claude, and some help from ChatGPT)
  * @version 2.3.2
  * @updated 2025-01-29
  * @license MIT
