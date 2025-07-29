@@ -1,13 +1,13 @@
 /**
  * ============================================================================
- * simple-mail-merge
+ * GADI'S MAIL MERGE SYSTEM
  * ============================================================================
  * 
- * A simple Gmail mail merge script for Google Sheets.
+ * Gmail mail merge solution for Google Sheets.
  * 
- * @author Gadi Evron (with Claude and some ChatGPT)
- * @version 2.3.0
- * @updated 2025-01-28
+ * @author Gadi Evron (with Claude)
+ * @version 2.3.2
+ * @updated 2025-01-29
  * @license MIT
  * ============================================================================
  */
@@ -88,17 +88,12 @@ function getContacts(sheet) {
  
  const data = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
  const contacts = [];
- const seenEmails = new Set();
  
  for (let i = 0; i < data.length; i++) {
  const row = data[i];
  const email = row[2] ? row[2].toString().trim() : "";
  
  if (!email || !validateEmail(email)) continue;
- 
- const emailLower = email.toLowerCase();
- if (seenEmails.has(emailLower)) continue;
- seenEmails.add(emailLower);
  
  contacts.push({
  rowNumber: i + 2,
@@ -165,34 +160,74 @@ function sendEmails() {
  return;
  }
  
- if (ui.alert("Confirm", `Send ${toSend.length} emails?`, ui.ButtonSet.YES_NO) !== ui.Button.YES) {
+ if (ui.alert("Confirm", `Send ${toSend.length} emails?\n\nWatch the Status column for live progress...`, ui.ButtonSet.YES_NO) !== ui.Button.YES) {
  return;
  }
  
+ // Make sure we're viewing the Contacts sheet so user can see updates
+ SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(contactsSheet);
+ 
  let successCount = 0;
+ let duplicateCount = 0;
+ const seenEmails = new Set();
  
  for (let i = 0; i < toSend.length; i++) {
  const contact = toSend[i];
+ 
+ // Check for duplicates at runtime
+ const emailLower = contact.email.toLowerCase();
+ if (seenEmails.has(emailLower)) {
+ const statusCell = contactsSheet.getRange(contact.rowNumber, 4);
+ statusCell.setValue(`Duplicate: Email skipped`);
+ statusCell.setBackground("#fff3cd"); // Light yellow background for duplicates
+ SpreadsheetApp.flush();
+ duplicateCount++;
+ continue;
+ }
+ seenEmails.add(emailLower);
+ 
+ // Show progress in the status column immediately with more obvious text
+ const statusCell = contactsSheet.getRange(contact.rowNumber, 4);
+ statusCell.setValue(`⏳ SENDING ${i + 1} of ${toSend.length}... PLEASE WAIT`);
+ statusCell.setBackground("#ffeb3b"); // Yellow background to make it obvious
+ SpreadsheetApp.flush();
+ 
+ // Add a small delay so user can see the "sending" status
+ Utilities.sleep(500);
  
  try {
  const personalizedSubject = personalizeText(emailDraft.subject, contact.name, contact.lastName);
  const personalizedBody = personalizeText(emailDraft.body, contact.name, contact.lastName);
  
+ // Send the email
  GmailApp.sendEmail(contact.email, personalizedSubject, "", { htmlBody: personalizedBody });
  
- contactsSheet.getRange(contact.rowNumber, 4).setValue(`Sent successfully on ${new Date().toLocaleDateString()}`);
+ // Immediately update with success status
  successCount++;
+ statusCell.setValue(`✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${new Date().toLocaleDateString()}`);
+ statusCell.setBackground("#d5f4e6"); // Light green background for success
+ SpreadsheetApp.flush();
+ 
+ console.log(`✅ Sent to ${contact.email} (${successCount}/${toSend.length})`);
  
  if (i < toSend.length - 1) Utilities.sleep(300);
  
  } catch (error) {
- contactsSheet.getRange(contact.rowNumber, 4).setValue(`FAILED: ${error.message}`);
- ui.alert("Error", `Failed at ${contact.email}: ${error.message}\n\nSent: ${successCount}`, ui.ButtonSet.OK);
+ console.log(`❌ Failed to send to ${contact.email}: ${error.message}`);
+ 
+ // Update failure status
+ statusCell.setValue(`❌ FAILED: ${error.message}`);
+ statusCell.setBackground("#ffcdd2"); // Light red background for errors
+ SpreadsheetApp.flush();
+ 
+ const duplicateText = duplicateCount > 0 ? ` | Duplicates: ${duplicateCount}` : '';
+ ui.alert("Error", `Failed at ${contact.email}: ${error.message}\n\nSent: ${successCount}${duplicateText}`, ui.ButtonSet.OK);
  return;
  }
  }
  
- ui.alert("Complete", `${successCount} emails sent successfully!`, ui.ButtonSet.OK);
+ const duplicateText = duplicateCount > 0 ? ` | Duplicates found: ${duplicateCount}` : '';
+ ui.alert("Complete", `${successCount} emails sent successfully!${duplicateText}`, ui.ButtonSet.OK);
 }
 
 function previewEmail() {
@@ -213,7 +248,10 @@ function previewEmail() {
  const previewSubject = personalizeText(emailDraft.subject, CONFIG.SAMPLE.NAME, CONFIG.SAMPLE.LAST_NAME);
  const previewBody = personalizeText(emailDraft.body, CONFIG.SAMPLE.NAME, CONFIG.SAMPLE.LAST_NAME);
  
- const preview = PREVIEW\n\nTo: ${CONFIG.SAMPLE.EMAIL}\nSubject: ${previewSubject}\n\nContent:\n${previewBody};
+ // Strip HTML tags for cleaner preview
+ const cleanBody = previewBody.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+ 
+ const preview = `PREVIEW\n\nTo: ${CONFIG.SAMPLE.EMAIL}\nSubject: ${previewSubject}\n\nContent:\n${cleanBody}`;
  
  ui.alert("Email Preview", preview, ui.ButtonSet.OK);
 }
@@ -354,6 +392,9 @@ function setupContactsSheet(sheet) {
  sheet.getRange(1, 1, data.length, 4).setValues(data);
  sheet.getRange(1, 1, 1, 4).setFontWeight("bold");
  sheet.setFrozenRows(1);
+ 
+ // Auto-resize all 4 columns
+ sheet.autoResizeColumns(1, 4);
 }
 
 function setupEmailDraftSheet(sheet) {
@@ -364,6 +405,10 @@ function setupEmailDraftSheet(sheet) {
  
  sheet.getRange(1, 1, data.length, 2).setValues(data);
  sheet.getRange("A1:A2").setFontWeight("bold");
+ 
+ // Resize columns A and B with minimums
+ sheet.setColumnWidth(1, Math.max(150, sheet.getColumnWidth(1)));
+ sheet.setColumnWidth(2, Math.max(300, sheet.getColumnWidth(2)));
 }
 
 function setupInstructionsSheet(sheet) {
@@ -386,6 +431,9 @@ function setupInstructionsSheet(sheet) {
  sheet.getRange("A1").setFontWeight("bold");
  sheet.getRange("A3").setFontWeight("bold");
  sheet.getRange("A9").setFontWeight("bold");
+ 
+ // Auto-resize column A
+ sheet.autoResizeColumn(1);
 }
 
 // ============================================================================
@@ -396,7 +444,7 @@ function onOpen() {
  .addItem("Create Merge Sheets", "createMergeSheets")
  .addItem("Send Emails", "sendEmails")
  .addSeparator()
- .addItem("Preview Email", "previewEmail")
+ .addItem("Popup Email Preview", "previewEmail")
  .addItem("Send Preview Test", "sendPreviewTest")
  .addSeparator()
  .addItem("Test Script", "testScriptSimple")
