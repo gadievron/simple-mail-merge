@@ -6,8 +6,8 @@
  * Gmail mail merge for Google Sheets.
  * 
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 2.4.0
- * @updated 2025-01-30
+ * @version 2.4.1
+ * @updated 2025-08-14
  * @license MIT
  * ============================================================================
  */
@@ -59,13 +59,26 @@ const MailMergeState = {
 // ============================================================================
 // UTILITIES
 // ============================================================================
-function validateEmail(email) {
- if (!email) return false;
- const trimmed = email.toString().trim();
- return trimmed.length > 4 && 
- trimmed.length < 255 && 
- trimmed.includes('@') && 
- /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+function extractAndValidateEmail(emailField) {
+ if (!emailField) return null;
+ 
+ let email = emailField.toString().trim();
+ 
+ // Extract email from "Name <email@domain.com>" format
+ const match = email.match(/<([^>]+)>/);
+ if (match) {
+ email = match[1].trim();
+ }
+ 
+ // Validate the extracted email
+ if (email.length < 5 || 
+ email.length > 254 || 
+ !email.includes('@') || 
+ !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+ return null;
+ }
+ 
+ return email;
 }
 
 function personalizeText(text, name, lastName, contact = null) {
@@ -110,15 +123,16 @@ function getContacts(sheet) {
  
  for (let i = 0; i < data.length; i++) {
  const row = data[i];
- const email = row[2] ? row[2].toString().trim() : "";
+ const emailField = row[2] ? row[2].toString().trim() : "";
  
- if (!email || !validateEmail(email)) continue;
+ const validEmail = extractAndValidateEmail(emailField);
+ if (!validEmail) continue;
  
  const contact = {
  rowNumber: i + 2,
  name: (row[0] || "").toString().trim(),
  lastName: (row[1] || "").toString().trim(),
- email: email,
+ email: validEmail,
  status: row[statusCol - 1] || "",
  statusColumn: statusCol
  };
@@ -284,10 +298,21 @@ function sendEmails() {
  } catch (error) {
  console.log(`❌ Failed to send to ${contact.email}: ${error.message}`);
  
- // Update failure status
+ // Ensure error status is always written, even if writing fails
+ try {
  statusCell.setValue(`❌ FAILED: ${error.message}`);
  statusCell.setBackground("#ffcdd2"); // Light red background for errors
  SpreadsheetApp.flush();
+ } catch (statusError) {
+ console.log(`❌ Could not write error status: ${statusError.message}`);
+ // Try writing a simple error message
+ try {
+ statusCell.setValue(`❌ SEND FAILED`);
+ SpreadsheetApp.flush();
+ } catch (finalError) {
+ console.log(`❌ Complete failure writing status: ${finalError.message}`);
+ }
+ }
  
  const duplicateText = duplicateCount > 0 ? ` | Duplicates: ${duplicateCount}` : '';
  ui.alert("Error", `Failed at ${contact.email}: ${error.message}\n\nSent: ${successCount}${duplicateText}`, ui.ButtonSet.OK);
@@ -343,7 +368,8 @@ function sendPreviewTest() {
  }
  
  const testEmail = draftSheet.getRange("B2").getValue();
- if (!testEmail || !validateEmail(testEmail) || testEmail.toString().trim() === "your-email@example.com") {
+ const validTestEmail = extractAndValidateEmail(testEmail);
+ if (!validTestEmail || testEmail.toString().trim() === "your-email@example.com") {
  ui.alert("Error", "Enter valid email in B2", ui.ButtonSet.OK);
  return;
  }
@@ -354,7 +380,7 @@ function sendPreviewTest() {
  return;
  }
  
- if (ui.alert("Confirm", `Send test to: ${testEmail}?`, ui.ButtonSet.YES_NO) !== ui.Button.YES) {
+ if (ui.alert("Confirm", `Send test to: ${validTestEmail}?`, ui.ButtonSet.YES_NO) !== ui.Button.YES) {
  return;
  }
  
@@ -375,9 +401,9 @@ function sendPreviewTest() {
  emailOptions.attachments = emailDraft.attachments;
  }
  
- GmailApp.sendEmail(testEmail, personalizedSubject, "", emailOptions);
+ GmailApp.sendEmail(validTestEmail, personalizedSubject, "", emailOptions);
  
- ui.alert("Success", `Test sent to: ${testEmail}`, ui.ButtonSet.OK);
+ ui.alert("Success", `Test sent to: ${validTestEmail}`, ui.ButtonSet.OK);
  } catch (error) {
  ui.alert("Error", `Test failed: ${error.message}`, ui.ButtonSet.OK);
  }
@@ -389,17 +415,18 @@ function testScriptSimple() {
  const emailResponse = ui.prompt("Test", "Enter your email:", ui.ButtonSet.OK_CANCEL);
  if (emailResponse.getSelectedButton() !== ui.Button.OK) return;
  
- const testEmail = emailResponse.getResponseText().trim();
- if (!validateEmail(testEmail)) {
+ const testEmailInput = emailResponse.getResponseText().trim();
+ const validTestEmail = extractAndValidateEmail(testEmailInput);
+ if (!validTestEmail) {
  ui.alert("Error", "Invalid email format", ui.ButtonSet.OK);
  return;
  }
  
- if (ui.alert("Confirm", `Send test to: ${testEmail}?`, ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+ if (ui.alert("Confirm", `Send test to: ${validTestEmail}?`, ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
  
  try {
- GmailApp.sendEmail(testEmail, "Mail Merge Test", "Gmail integration working!");
- ui.alert("Success", `Test sent to: ${testEmail}`, ui.ButtonSet.OK);
+ GmailApp.sendEmail(validTestEmail, "Mail Merge Test", "Gmail integration working!");
+ ui.alert("Success", `Test sent to: ${validTestEmail}`, ui.ButtonSet.OK);
  } catch (error) {
  ui.alert("Error", `Test failed: ${error.message}`, ui.ButtonSet.OK);
  }
@@ -613,7 +640,7 @@ function setupInstructionsSheet(sheet) {
  ["HELP: Show quick help dialog"],
  [""],
  ["════════════════════════════════════════════════════════════════════════"],
- ["Version: 2.4.0 | Author: Gadi Evron | Updated: 2025-01-30"]
+ ["Version: 2.4.0 | Author: Gadi Evron | Updated: 2025-08-14"]
  ];
  
  sheet.getRange(1, 1, instructions.length, 1).setValues(instructions);
