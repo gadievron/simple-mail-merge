@@ -6,7 +6,7 @@
  * Gmail mail merge for Google Sheets.
  * 
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 2.4.5
+ * @version 2.6
  * @updated 2025-08-21
  * @license MIT
  * ============================================================================
@@ -72,6 +72,10 @@ function extractAndValidateEmail(emailField) {
   const match = email.match(/<([^>]+)>/);
   if (match) {
     email = match[1].trim();
+  } else {
+    // NEW: fallback – pick first email-like token if no angle brackets
+    const m = email.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    if (m) email = m[0];
   }
   
   // Validate the extracted email
@@ -109,6 +113,31 @@ function getSheet(name) {
   return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
 }
 
+// Robust status writer with tiny retry to avoid missed updates
+function writeStatus(statusCell, value, bg) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      statusCell.setValue(value);
+      if (bg) statusCell.setBackground(bg);
+      SpreadsheetApp.flush();
+      return true;
+    } catch (e) {
+      if (attempt < 2) Utilities.sleep(100);
+    }
+  }
+  // Last-chance fallback: value only
+  try {
+    statusCell.setValue(value);
+    SpreadsheetApp.flush();
+  } catch (e) {}
+  return false;
+}
+
+function shouldPreflight(status) {
+  const s = String(status || "").toUpperCase();
+  return s === "" || s.includes("SENDING") || s.includes("FAILED");
+}
+
 // ============================================================================
 // CORE FUNCTIONS
 // ============================================================================
@@ -122,9 +151,14 @@ function getContacts(sheet) {
   
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
-    const emailField = row[2] ? row[2].toString().trim() : "";
-    
-    const validEmail = extractAndValidateEmail(emailField);
+    const emailFieldRaw = row[2] ? row[2].toString().trim() : "";
+
+    // NEW: detect multiple emails; take first
+    const emailsFound = emailFieldRaw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || [];
+    if (emailsFound.length === 0) continue;
+    const primaryEmailRaw = emailsFound[0];
+
+    const validEmail = extractAndValidateEmail(primaryEmailRaw);
     if (!validEmail) continue;
     
     const contact = {
@@ -137,7 +171,9 @@ function getContacts(sheet) {
       custom1: (row[5] || "").toString().trim(),
       custom2: (row[6] || "").toString().trim(),
       status: row[7] || "",
-      statusColumn: 8
+      statusColumn: 8,
+      // NEW: flag for multi-email cell
+      multiEmail: emailsFound.length > 1
     };
     
     contacts.push(contact);
@@ -219,6 +255,13 @@ function sendEmails() {
     return !s.includes("SENT SUCCESSFULLY");
   });
   
+  // Build cross-run duplicate set once
+  const previouslySentEmails = new Set(
+    contacts
+      .filter(c => String(c.status || "").toUpperCase().includes("SENT SUCCESSFULLY"))
+      .map(c => String(c.email || "").toLowerCase())
+  );
+
   if (toSend.length === 0) {
     ui.alert("Complete", "All emails already sent!", ui.ButtonSet.OK);
     return;
@@ -237,56 +280,50 @@ function sendEmails() {
   
   for (let i = 0; i < toSend.length; i++) {
     const contact = toSend[i];
+    const statusCell = contactsSheet.getRange(contact.rowNumber, contact.statusColumn);
     
-    // Check for duplicates at runtime
+    // Check duplicates
     const emailLower = contact.email.toLowerCase();
 
     // Cross-run duplicate: if this email was already sent in any prior row, skip
     if (previouslySentEmails.has(emailLower)) {
-      statusCell.setValue(`Duplicate: Previously sent`);
-      statusCell.setBackground("#fff3cd");
-      SpreadsheetApp.flush();
+      writeStatus(statusCell, `Duplicate: Previously sent`, "#fff3cd");
       continue;
     }
 
-    // Check for duplicates at runtime (within this run)
+    // In-run duplicate (within this batch)
     if (seenEmails.has(emailLower)) {
-      statusCell.setValue(`[SKIP] Duplicate within batch`);
-      statusCell.setBackground("#fff3cd"); // Light yellow
-      SpreadsheetApp.flush();
+      writeStatus(statusCell, `[SKIP] Duplicate within batch`, "#fff3cd"); // Light yellow
       duplicateCount++;
       continue;
     }
     seenEmails.add(emailLower);
     
-    // Show progress in the status column immediately with more obvious text
-    const statusCell = contactsSheet.getRange(contact.rowNumber, contact.statusColumn);
-    statusCell.setValue(`⏳ SENDING ${i + 1} of ${toSend.length}... PLEASE WAIT`);
-    statusCell.setBackground("#ffeb3b"); // Yellow background to make it obvious
-    SpreadsheetApp.flush();
-    
-    // Add a small delay so user can see the "sending" status
-    Utilities.sleep(500);
+    // Show progress
+    writeStatus(statusCell, `⏳ SENDING ${i + 1} of ${toSend.length}... PLEASE WAIT`, "#ffeb3b");
+    Utilities.sleep(300);
     
     try {
       const personalizedSubject = personalizeText(emailDraft.subject, contact.name, contact.lastName, contact);
       const personalizedBody = personalizeText(emailDraft.body, contact.name, contact.lastName, contact);
-      
-      // Preflight: if a matching email was recently sent, mark success and skip
-      try {
-        const safeSubj = personalizedSubject.replace(/"/g, '\"');
-        const query = `from:me to:${contact.email} subject:"${safeSubj}" newer_than:3d`;
-        const threads = GmailApp.search(query);
-        if (threads && threads.length > 0) {
-          const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
-          successCount++;
-          statusCell.setValue(`✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified prior send)`);
-          statusCell.setBackground("#d5f4e6");
-          SpreadsheetApp.flush();
-          continue;
+
+      // Preflight (only for blank/SENDING/FAILED)
+      if (shouldPreflight(contact.status)) {
+        try {
+          const safeSubj = String(personalizedSubject).replace(/["“”]/g, "");
+          const query = `from:me to:${contact.email} subject:"${safeSubj}" newer_than:3d`;
+          const threads = GmailApp.search(query);
+          if (threads && threads.length > 0) {
+            const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+            successCount++;
+            const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
+            const successBg = contact.multiEmail ? "#cfe8ff" : "#d5f4e6";
+            writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified prior send)${multiTag}`, successBg);
+            continue;
+          }
+        } catch (e) {
+          // if search fails, proceed with send
         }
-      } catch (e) {
-        // if search fails, proceed with send
       }
       
       // Build recipient list
@@ -297,47 +334,36 @@ function sendEmails() {
       
       // Prepare email options
       const emailOptions = { htmlBody: personalizedBody };
-      if (emailDraft.senderName) {
-        emailOptions.name = emailDraft.senderName;
-      }
-      if (emailDraft.attachments && emailDraft.attachments.length > 0) {
-        emailOptions.attachments = emailDraft.attachments;
-      }
-      if (emailDraft.cc) {
-        emailOptions.cc = emailDraft.cc;
-      }
-      if (emailDraft.bcc) {
-        emailOptions.bcc = emailDraft.bcc;
-      }
+      if (emailDraft.senderName) emailOptions.name = emailDraft.senderName;
+      if (emailDraft.attachments && emailDraft.attachments.length > 0) emailOptions.attachments = emailDraft.attachments;
+      if (emailDraft.cc) emailOptions.cc = emailDraft.cc;
+      if (emailDraft.bcc) emailOptions.bcc = emailDraft.bcc;
       
       // Send the email
       GmailApp.sendEmail(toRecipients, personalizedSubject, "", emailOptions);
       
-      // Immediately update with success status
+      // Success status with stable date
       successCount++;
-      statusCell.setValue(`✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd")}`);
-      statusCell.setBackground("#d5f4e6"); // Light green background for success
-      SpreadsheetApp.flush();
-      
-      console.log(`✅ Sent to ${contact.email} (${successCount}/${toSend.length})`);
+      const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+      const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
+      const successBg = contact.multiEmail ? "#cfe8ff" : "#d5f4e6";
+      writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr}${multiTag}`, successBg);
       
       if (i < toSend.length - 1) Utilities.sleep(300);
       
     } catch (error) {
-      console.log(`❌ Failed to send to ${contact.email}: ${error.message}`);
-
       // Before marking failure, verify if Gmail actually sent it
       let verified = false;
       try {
-        const safeSubj = personalizedSubject.replace(/\"/g, '\"');
-        const query = `from:me to:${contact.email} subject:\"${safeSubj}\" newer_than:3d`;
+        const safeSubj = String(personalizedSubject).replace(/["“”]/g, "");
+        const query = `from:me to:${contact.email} subject:"${safeSubj}" newer_than:3d`;
         const threads = GmailApp.search(query);
         if (threads && threads.length > 0) {
           const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
           successCount++;
-          statusCell.setValue(`✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified after error)`);
-          statusCell.setBackground("#d5f4e6");
-          SpreadsheetApp.flush();
+          const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
+          const successBg = contact.multiEmail ? "#cfe8ff" : "#d5f4e6";
+          writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified after error)${multiTag}`, successBg);
           verified = true;
         }
       } catch (e) {
@@ -345,29 +371,15 @@ function sendEmails() {
       }
 
       if (!verified) {
-        // Ensure error status is always written, even if writing fails
-        try {
-          statusCell.setValue(`❌ FAILED: ${error.message}`);
-          statusCell.setBackground("#ffcdd2");
-          SpreadsheetApp.flush();
-        } catch (statusError) {
-          console.log(`❌ Could not write error status: ${statusError.message}`);
-          try {
-            statusCell.setValue(`❌ SEND FAILED`);
-            SpreadsheetApp.flush();
-          } catch (finalError) {
-            console.log(`❌ Complete failure writing status: ${finalError.message}`);
-          }
-        }
+        writeStatus(statusCell, `❌ FAILED: ${error.message}`, "#ffcdd2");
       }
 
       const duplicateText = duplicateCount > 0 ? ` | Duplicates: ${duplicateCount}` : '';
-      const verifiedText = verified ? ' (verified previously sent)' : '';
-      ui.alert(verified ? "Notice" : "Error", verified ? `Send already completed earlier for ${contact.email}.${verifiedText}
-
-Sent: ${successCount}${duplicateText}` : `Failed at ${contact.email}: ${error.message}
-
-Sent: ${successCount}${duplicateText}`, ui.ButtonSet.OK);
+      ui.alert(verified ? "Notice" : "Error",
+        verified
+          ? `Send already completed earlier for ${contact.email}.\n\nSent: ${successCount}${duplicateText}`
+          : `Failed at ${contact.email}: ${error.message}\n\nSent: ${successCount}${duplicateText}`,
+        ui.ButtonSet.OK);
       return;
     }
   }
@@ -706,7 +718,7 @@ function setupInstructionsSheet(sheet) {
     ["HELP: Show quick help dialog"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 2.4.5 | Author: Gadi Evron | Updated: 2025-08-21"]
+    ["Version: 2.6 | Author: Gadi Evron | Updated: 2025-08-21"]
   ];
   
   sheet.getRange(1, 1, instructions.length, 1).setValues(instructions);
