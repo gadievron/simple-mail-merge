@@ -6,7 +6,7 @@
  * Gmail mail merge for Google Sheets.
  * 
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 2.6
+ * @version 2.6.1
  * @updated 2025-08-21
  * @license MIT
  * ============================================================================
@@ -73,7 +73,7 @@ function extractAndValidateEmail(emailField) {
   if (match) {
     email = match[1].trim();
   } else {
-    // NEW: fallback – pick first email-like token if no angle brackets
+    // Fallback – pick first email-like token if no angle brackets
     const m = email.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
     if (m) email = m[0];
   }
@@ -153,7 +153,7 @@ function getContacts(sheet) {
     const row = data[i];
     const emailFieldRaw = row[2] ? row[2].toString().trim() : "";
 
-    // NEW: detect multiple emails; take first
+    // Detect multiple emails; take first
     const emailsFound = emailFieldRaw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || [];
     if (emailsFound.length === 0) continue;
     const primaryEmailRaw = emailsFound[0];
@@ -172,7 +172,6 @@ function getContacts(sheet) {
       custom2: (row[6] || "").toString().trim(),
       status: row[7] || "",
       statusColumn: 8,
-      // NEW: flag for multi-email cell
       multiEmail: emailsFound.length > 1
     };
     
@@ -317,7 +316,7 @@ function sendEmails() {
             const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
             successCount++;
             const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
-            const successBg = contact.multiEmail ? "#cfe8ff" : "#d5f4e6";
+            const successBg = contact.multiEmail ? "#ead1ff" : "#d5f4e6";
             writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified prior send)${multiTag}`, successBg);
             continue;
           }
@@ -346,7 +345,7 @@ function sendEmails() {
       successCount++;
       const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
       const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
-      const successBg = contact.multiEmail ? "#cfe8ff" : "#d5f4e6";
+      const successBg = contact.multiEmail ? "#ead1ff" : "#d5f4e6";
       writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr}${multiTag}`, successBg);
       
       if (i < toSend.length - 1) Utilities.sleep(300);
@@ -362,7 +361,7 @@ function sendEmails() {
           const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
           successCount++;
           const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
-          const successBg = contact.multiEmail ? "#cfe8ff" : "#d5f4e6";
+          const successBg = contact.multiEmail ? "#ead1ff" : "#d5f4e6";
           writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified after error)${multiTag}`, successBg);
           verified = true;
         }
@@ -718,7 +717,7 @@ function setupInstructionsSheet(sheet) {
     ["HELP: Show quick help dialog"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 2.6 | Author: Gadi Evron | Updated: 2025-08-21"]
+    ["Version: 2.6.1 | Author: Gadi Evron | Updated: 2025-08-21"]
   ];
   
   sheet.getRange(1, 1, instructions.length, 1).setValues(instructions);
