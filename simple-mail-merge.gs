@@ -6,8 +6,8 @@
  * Gmail mail merge for Google Sheets.
  * 
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 2.4.3
- * @updated 2025-08-18
+ * @version 2.4.4
+ * @updated 2025-08-21
  * @license MIT
  * ============================================================================
  */
@@ -214,9 +214,10 @@ function sendEmails() {
     return;
   }
   
-  const toSend = contacts.filter(c => 
-    !c.status || !c.status.toString().includes("Sent successfully")
-  );
+  const toSend = contacts.filter(c => {
+    const s = (c.status || "").toString().toUpperCase();
+    return !s.includes("SENT SUCCESSFULLY");
+  });
   
   if (toSend.length === 0) {
     ui.alert("Complete", "All emails already sent!", ui.ButtonSet.OK);
@@ -262,6 +263,23 @@ function sendEmails() {
       const personalizedSubject = personalizeText(emailDraft.subject, contact.name, contact.lastName, contact);
       const personalizedBody = personalizeText(emailDraft.body, contact.name, contact.lastName, contact);
       
+      // Preflight: if a matching email was recently sent, mark success and skip
+      try {
+        const safeSubj = personalizedSubject.replace(/"/g, '\"');
+        const query = `from:me to:${contact.email} subject:"${safeSubj}" newer_than:3d`;
+        const threads = GmailApp.search(query);
+        if (threads && threads.length > 0) {
+          const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+          successCount++;
+          statusCell.setValue(`✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified prior send)`);
+          statusCell.setBackground("#d5f4e6");
+          SpreadsheetApp.flush();
+          continue;
+        }
+      } catch (e) {
+        // if search fails, proceed with send
+      }
+      
       // Build recipient list
       let toRecipients = contact.email;
       if (emailDraft.additionalTo) {
@@ -288,7 +306,7 @@ function sendEmails() {
       
       // Immediately update with success status
       successCount++;
-      statusCell.setValue(`✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${new Date().toLocaleDateString()}`);
+      statusCell.setValue(`✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd")}`);
       statusCell.setBackground("#d5f4e6"); // Light green background for success
       SpreadsheetApp.flush();
       
@@ -298,25 +316,49 @@ function sendEmails() {
       
     } catch (error) {
       console.log(`❌ Failed to send to ${contact.email}: ${error.message}`);
-      
-      // Ensure error status is always written, even if writing fails
+
+      // Before marking failure, verify if Gmail actually sent it
+      let verified = false;
       try {
-        statusCell.setValue(`❌ FAILED: ${error.message}`);
-        statusCell.setBackground("#ffcdd2"); // Light red background for errors
-        SpreadsheetApp.flush();
-      } catch (statusError) {
-        console.log(`❌ Could not write error status: ${statusError.message}`);
-        // Try writing a simple error message
-        try {
-          statusCell.setValue(`❌ SEND FAILED`);
+        const safeSubj = personalizedSubject.replace(/\"/g, '\"');
+        const query = `from:me to:${contact.email} subject:\"${safeSubj}\" newer_than:3d`;
+        const threads = GmailApp.search(query);
+        if (threads && threads.length > 0) {
+          const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+          successCount++;
+          statusCell.setValue(`✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified after error)`);
+          statusCell.setBackground("#d5f4e6");
           SpreadsheetApp.flush();
-        } catch (finalError) {
-          console.log(`❌ Complete failure writing status: ${finalError.message}`);
+          verified = true;
+        }
+      } catch (e) {
+        // ignore search failures; fall back to failure status
+      }
+
+      if (!verified) {
+        // Ensure error status is always written, even if writing fails
+        try {
+          statusCell.setValue(`❌ FAILED: ${error.message}`);
+          statusCell.setBackground("#ffcdd2");
+          SpreadsheetApp.flush();
+        } catch (statusError) {
+          console.log(`❌ Could not write error status: ${statusError.message}`);
+          try {
+            statusCell.setValue(`❌ SEND FAILED`);
+            SpreadsheetApp.flush();
+          } catch (finalError) {
+            console.log(`❌ Complete failure writing status: ${finalError.message}`);
+          }
         }
       }
-      
+
       const duplicateText = duplicateCount > 0 ? ` | Duplicates: ${duplicateCount}` : '';
-      ui.alert("Error", `Failed at ${contact.email}: ${error.message}\n\nSent: ${successCount}${duplicateText}`, ui.ButtonSet.OK);
+      const verifiedText = verified ? ' (verified previously sent)' : '';
+      ui.alert(verified ? "Notice" : "Error", verified ? `Send already completed earlier for ${contact.email}.${verifiedText}
+
+Sent: ${successCount}${duplicateText}` : `Failed at ${contact.email}: ${error.message}
+
+Sent: ${successCount}${duplicateText}`, ui.ButtonSet.OK);
       return;
     }
   }
