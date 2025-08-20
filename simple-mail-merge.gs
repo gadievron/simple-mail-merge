@@ -6,7 +6,7 @@
  * Gmail mail merge for Google Sheets.
  * 
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 2.6.1
+ * @version 2.6.2
  * @updated 2025-08-21
  * @license MIT
  * ============================================================================
@@ -31,6 +31,14 @@ const CONFIG = {
     CUSTOM1: "Engineering",
     CUSTOM2: "San Francisco"
   }
+};
+
+// Pacing: aim for ~300ms total per row.
+// If preflight search (~120ms) ran, sleep 180ms; otherwise sleep 300ms.
+const PAUSE = {
+  SENDING_MS: 0,
+  BETWEEN_SENDS_DEFAULT_MS: 300,
+  BETWEEN_SENDS_AFTER_SEARCH_MS: 180
 };
 
 // ============================================================================
@@ -248,6 +256,9 @@ function sendEmails() {
     ui.alert("Error", "Gmail draft not found. Check subject in B1 and ensure it matches your Gmail draft exactly.", ui.ButtonSet.OK);
     return;
   }
+
+  // Detect truly fresh run (no statuses present at all) → no preflight on blanks
+  const isFreshRun = contacts.every(c => String(c.status || "").trim() === "");
   
   const toSend = contacts.filter(c => {
     const s = (c.status || "").toString().toUpperCase();
@@ -284,15 +295,15 @@ function sendEmails() {
     // Check duplicates
     const emailLower = contact.email.toLowerCase();
 
-    // Cross-run duplicate: if this email was already sent in any prior row, skip
+    // Cross-run duplicate: already marked sent somewhere → skip
     if (previouslySentEmails.has(emailLower)) {
-      writeStatus(statusCell, `Duplicate: Previously sent`, "#fff3cd");
+      writeStatus(statusCell, `Duplicate: Previously sent`, "#ead1ff");
       continue;
     }
 
     // In-run duplicate (within this batch)
     if (seenEmails.has(emailLower)) {
-      writeStatus(statusCell, `[SKIP] Duplicate within batch`, "#fff3cd"); // Light yellow
+      writeStatus(statusCell, `[SKIP] Duplicate within batch`, "#ead1ff");
       duplicateCount++;
       continue;
     }
@@ -300,24 +311,31 @@ function sendEmails() {
     
     // Show progress
     writeStatus(statusCell, `⏳ SENDING ${i + 1} of ${toSend.length}... PLEASE WAIT`, "#ffeb3b");
-    Utilities.sleep(300);
+    Utilities.sleep(PAUSE.SENDING_MS);
+    
+    let didPreflightSearch = false; // track per-row
+    let lastPersonalizedSubject = null; // for post-error verification
     
     try {
       const personalizedSubject = personalizeText(emailDraft.subject, contact.name, contact.lastName, contact);
       const personalizedBody = personalizeText(emailDraft.body, contact.name, contact.lastName, contact);
+      lastPersonalizedSubject = personalizedSubject;
 
-      // Preflight (only for blank/SENDING/FAILED)
-      if (shouldPreflight(contact.status)) {
+      // Preflight (resume-only) for blank/SENDING/FAILED
+      if (!isFreshRun && shouldPreflight(contact.status)) {
         try {
           const safeSubj = String(personalizedSubject).replace(/["“”]/g, "");
-          const query = `from:me to:${contact.email} subject:"${safeSubj}" newer_than:3d`;
+          const query = `in:sent from:me to:${contact.email} subject:"${safeSubj}" newer_than:3d`;
+          didPreflightSearch = true;
           const threads = GmailApp.search(query);
           if (threads && threads.length > 0) {
             const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
             successCount++;
             const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
-            const successBg = contact.multiEmail ? "#ead1ff" : "#d5f4e6";
-            writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified prior send)${multiTag}`, successBg);
+            // Duplicates in Gmail → lavender always
+            writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified prior send)${multiTag}`, "#ead1ff");
+            // pace: search (~120ms) + 180ms sleep ≈ 300ms total
+            if (i < toSend.length - 1) Utilities.sleep(PAUSE.BETWEEN_SENDS_AFTER_SEARCH_MS);
             continue;
           }
         } catch (e) {
@@ -348,22 +366,28 @@ function sendEmails() {
       const successBg = contact.multiEmail ? "#ead1ff" : "#d5f4e6";
       writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr}${multiTag}`, successBg);
       
-      if (i < toSend.length - 1) Utilities.sleep(300);
+      // pace: if we searched preflight, only sleep 180; else 300
+      if (i < toSend.length - 1) {
+        Utilities.sleep(didPreflightSearch ? PAUSE.BETWEEN_SENDS_AFTER_SEARCH_MS
+                                           : PAUSE.BETWEEN_SENDS_DEFAULT_MS);
+      }
       
     } catch (error) {
       // Before marking failure, verify if Gmail actually sent it
       let verified = false;
       try {
-        const safeSubj = String(personalizedSubject).replace(/["“”]/g, "");
-        const query = `from:me to:${contact.email} subject:"${safeSubj}" newer_than:3d`;
-        const threads = GmailApp.search(query);
-        if (threads && threads.length > 0) {
-          const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
-          successCount++;
-          const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
-          const successBg = contact.multiEmail ? "#ead1ff" : "#d5f4e6";
-          writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified after error)${multiTag}`, successBg);
-          verified = true;
+        if (lastPersonalizedSubject) {
+          const safeSubj = String(lastPersonalizedSubject).replace(/["“”]/g, "");
+          const query = `in:sent from:me to:${contact.email} subject:"${safeSubj}" newer_than:3d`;
+          const threads = GmailApp.search(query);
+          if (threads && threads.length > 0) {
+            const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+            successCount++;
+            const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
+            // Duplicates in Gmail → lavender always
+            writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified after error)${multiTag}`, "#ead1ff");
+            verified = true;
+          }
         }
       } catch (e) {
         // ignore search failures; fall back to failure status
@@ -702,22 +726,25 @@ function setupInstructionsSheet(sheet) {
     ["  • Fill these in the 'Email Draft' sheet"],
     [""],
     ["═══════════════════════════════════════════════════════════════════════"],
-    ["⚡ MENU FUNCTIONS"],
+    ["⚡ STATUS LEGEND"],
     ["═══════════════════════════════════════════════════════════════════════"],
-    ["CREATE MERGE SHEETS: Set up sheets with standard 8-column format"],
-    ["SEND EMAILS: Main function - sends personalized emails"],
+    ["✅ SENT SUCCESSFULLY (X/Y) on YYYY-MM-DD — normal success (green)"],
+    ["✅ … (verified prior send) — found in Sent Mail recently; not resent (lavender)"],
+    ["✅ … (verified after error) — send errored but Gmail shows it sent (lavender)"],
+    ["✅ … | MULTI-EMAIL CELL: used first; others skipped — success from a cell with multiple emails (lavender)"],
+    ["⏳ SENDING N of M… PLEASE WAIT — in progress (yellow)"],
+    ["❌ FAILED: <error> — send failed (red)"],
+    ["Duplicate: Previously sent — duplicate across runs/sheet (lavender)"],
+    ["[SKIP] Duplicate within batch — duplicate within this run (lavender)"],
     [""],
-    ["POPUP EMAIL PREVIEW: See how your email will look"],
-    ["SEND PREVIEW EMAIL: Send test email to yourself"],
-    [""],
-    ["TEST SCRIPT: Quick Gmail integration test"],
-    [""],
-    ["RESET CONTACTS SHEET: Clear all contacts, reset to standard format"],
-    ["CLEAR SENT STATUS: Remove all status markers (allows re-sending)"],
-    ["HELP: Show quick help dialog"],
+    ["COLORS:"],
+    ["  • Success (normal): #d5f4e6"],
+    ["  • Duplicate & Multi-email success: #ead1ff (lavender)"],
+    ["  • Sending: #ffeb3b"],
+    ["  • Failed: #ffcdd2"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 2.6.1 | Author: Gadi Evron | Updated: 2025-08-21"]
+    ["Version: 2.6.2 | Author: Gadi Evron | Updated: 2025-08-21"]
   ];
   
   sheet.getRange(1, 1, instructions.length, 1).setValues(instructions);
