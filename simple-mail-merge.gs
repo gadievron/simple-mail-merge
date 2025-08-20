@@ -6,7 +6,7 @@
  * Gmail mail merge for Google Sheets.
  * 
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 2.4.4
+ * @version 2.4.5
  * @updated 2025-08-21
  * @license MIT
  * ============================================================================
@@ -240,10 +240,19 @@ function sendEmails() {
     
     // Check for duplicates at runtime
     const emailLower = contact.email.toLowerCase();
+
+    // Cross-run duplicate: if this email was already sent in any prior row, skip
+    if (previouslySentEmails.has(emailLower)) {
+      statusCell.setValue(`Duplicate: Previously sent`);
+      statusCell.setBackground("#fff3cd");
+      SpreadsheetApp.flush();
+      continue;
+    }
+
+    // Check for duplicates at runtime (within this run)
     if (seenEmails.has(emailLower)) {
-      const statusCell = contactsSheet.getRange(contact.rowNumber, contact.statusColumn);
-      statusCell.setValue(`Duplicate: Email skipped`);
-      statusCell.setBackground("#fff3cd"); // Light yellow background for duplicates
+      statusCell.setValue(`[SKIP] Duplicate within batch`);
+      statusCell.setBackground("#fff3cd"); // Light yellow
       SpreadsheetApp.flush();
       duplicateCount++;
       continue;
@@ -697,7 +706,7 @@ function setupInstructionsSheet(sheet) {
     ["HELP: Show quick help dialog"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 2.4.1 | Author: Gadi Evron | Updated: 2025-08-14"]
+    ["Version: 2.4.5 | Author: Gadi Evron | Updated: 2025-08-21"]
   ];
   
   sheet.getRange(1, 1, instructions.length, 1).setValues(instructions);
