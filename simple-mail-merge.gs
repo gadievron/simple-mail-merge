@@ -1,3 +1,6 @@
+Here’s the full script with the **multi-email success color fixed in the verified paths** (preflight + post-error). I also updated the Instructions legend to note the “peach if multi-email” nuance for Gmail-verified successes. Everything else is unchanged.
+
+```javascript
 /**
  * ============================================================================
  * Gadi's Simple Mail Merge
@@ -6,7 +9,7 @@
  * Gmail mail merge for Google Sheets.
  * 
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 2.6.4
+ * @version 2.6.5
  * @updated 2025-08-21
  * @license MIT
  * ============================================================================
@@ -332,8 +335,9 @@ function sendEmails() {
             const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
             successCount++;
             const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
-            // Gmail duplicate → lavender always
-            writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified prior send)${multiTag}`, "#ead1ff");
+            // Gmail verified success → peach if multi-email else lavender
+            const successBgPreflight = contact.multiEmail ? "#ffe0b2" : "#ead1ff";
+            writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified prior send)${multiTag}`, successBgPreflight);
             // pace: search (~120ms) + 180ms sleep ≈ 300ms total
             if (i < toSend.length - 1) Utilities.sleep(PAUSE.BETWEEN_SENDS_AFTER_SEARCH_MS);
             continue;
@@ -385,8 +389,9 @@ function sendEmails() {
             const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
             successCount++;
             const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
-            // Gmail duplicate → lavender always
-            writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified after error)${multiTag}`, "#ead1ff");
+            // Gmail verified success → peach if multi-email else lavender
+            const successBgPostError = contact.multiEmail ? "#ffe0b2" : "#ead1ff";
+            writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified after error)${multiTag}`, successBgPostError);
             verified = true;
           }
         }
@@ -730,8 +735,8 @@ function setupInstructionsSheet(sheet) {
     ["⚡ STATUS LEGEND"],
     ["═══════════════════════════════════════════════════════════════════════"],
     ["✅ SENT SUCCESSFULLY (X/Y) on YYYY-MM-DD — normal success (green)"],
-    ["✅ … (verified prior send) — found in Sent Mail recently; not resent (lavender)"],
-    ["✅ … (verified after error) — send errored but Gmail shows it sent (lavender)"],
+    ["✅ … (verified prior send) — found in Sent Mail recently; not resent (lavender; peach if multi-email)"],
+    ["✅ … (verified after error) — send errored but Gmail shows it sent (lavender; peach if multi-email)"],
     ["✅ … | MULTI-EMAIL CELL: used first; others skipped — success from a cell with multiple emails (peach)"],
     ["⏳ SENDING N of M… PLEASE WAIT — in progress (yellow)"],
     ["❌ FAILED: <error> — send failed (red)"],
@@ -741,12 +746,13 @@ function setupInstructionsSheet(sheet) {
     ["COLORS:"],
     ["  • Success (normal): #d5f4e6 (green)"],
     ["  • Success (multi-email): #ffe0b2 (peach)"],
-    ["  • Duplicates & Gmail-verified: #ead1ff (lavender)"],
+    ["  • Duplicates: #ead1ff (lavender)"],
+    ["  • Gmail-verified success: #ead1ff (lavender) or #ffe0b2 (peach if multi-email)"],
     ["  • Sending: #ffeb3b (yellow)"],
     ["  • Failed: #ffcdd2 (red)"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 2.6.4 | Author: Gadi Evron | Updated: 2025-08-21"]
+    ["Version: 2.6.5 | Author: Gadi Evron | Updated: 2025-08-21"]
   ];
   
   sheet.getRange(1, 1, instructions.length, 1).setValues(instructions);
@@ -773,3 +779,4 @@ function onOpen() {
     .addItem("Help", "showHelp")
     .addToUi();
 }
+```
