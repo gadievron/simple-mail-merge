@@ -6,7 +6,7 @@
  * Gmail mail merge for Google Sheets.
  * 
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 2.6.2
+ * @version 2.6.3
  * @updated 2025-08-21
  * @license MIT
  * ============================================================================
@@ -744,7 +744,7 @@ function setupInstructionsSheet(sheet) {
     ["  • Failed: #ffcdd2"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 2.6.2 | Author: Gadi Evron | Updated: 2025-08-21"]
+    ["Version: 2.6.3 | Author: Gadi Evron | Updated: 2025-08-21"]
   ];
   
   sheet.getRange(1, 1, instructions.length, 1).setValues(instructions);
