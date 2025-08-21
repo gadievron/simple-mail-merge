@@ -1,6 +1,3 @@
-Here’s the full script with the **multi-email success color fixed in the verified paths** (preflight + post-error). I also updated the Instructions legend to note the “peach if multi-email” nuance for Gmail-verified successes. Everything else is unchanged.
-
-```javascript
 /**
  * ============================================================================
  * Gadi's Simple Mail Merge
@@ -9,7 +6,7 @@ Here’s the full script with the **multi-email success color fixed in the verif
  * Gmail mail merge for Google Sheets.
  * 
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 2.6.5
+ * @version 2.6.6
  * @updated 2025-08-21
  * @license MIT
  * ============================================================================
@@ -594,15 +591,7 @@ function clearSentStatus() {
 function showHelp() {
   const ui = SpreadsheetApp.getUi();
   
-  const helpText = `MAIL MERGE HELP
-
-1. Run 'Create Merge Sheets'
-2. Create Gmail draft with {{Name}} {{Last Name}}
-3. Enter draft subject in Email Draft sheet B1
-4. Add contacts to Contacts sheet
-5. Use 'Send Emails'
-
-Check Instructions sheet for more details.`;
+  const helpText = `MAIL MERGE HELP\n\n1. Run 'Create Merge Sheets'\n2. Create Gmail draft with {{Name}} {{Last Name}}\n3. Enter draft subject in Email Draft sheet B1\n4. Add contacts to Contacts sheet\n5. Use 'Send Emails'\n\nCheck Instructions sheet for more details.`;
   
   ui.alert("Help", helpText, ui.ButtonSet.OK);
 }
@@ -752,7 +741,7 @@ function setupInstructionsSheet(sheet) {
     ["  • Failed: #ffcdd2 (red)"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 2.6.5 | Author: Gadi Evron | Updated: 2025-08-21"]
+    ["Version: 2.6.6 | Author: Gadi Evron | Updated: 2025-08-21"]
   ];
   
   sheet.getRange(1, 1, instructions.length, 1).setValues(instructions);
@@ -779,4 +768,3 @@ function onOpen() {
     .addItem("Help", "showHelp")
     .addToUi();
 }
-```
