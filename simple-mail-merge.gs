@@ -6,7 +6,7 @@
  * Gmail mail merge for Google Sheets.
  * 
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 2.6.3
+ * @version 2.6.4
  * @updated 2025-08-21
  * @license MIT
  * ============================================================================
@@ -332,7 +332,7 @@ function sendEmails() {
             const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
             successCount++;
             const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
-            // Duplicates in Gmail → lavender always
+            // Gmail duplicate → lavender always
             writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified prior send)${multiTag}`, "#ead1ff");
             // pace: search (~120ms) + 180ms sleep ≈ 300ms total
             if (i < toSend.length - 1) Utilities.sleep(PAUSE.BETWEEN_SENDS_AFTER_SEARCH_MS);
@@ -363,7 +363,8 @@ function sendEmails() {
       successCount++;
       const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
       const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
-      const successBg = contact.multiEmail ? "#ead1ff" : "#d5f4e6";
+      // Normal success: multi-email gets PEACH (#ffe0b2), normal success stays GREEN
+      const successBg = contact.multiEmail ? "#ffe0b2" : "#d5f4e6";
       writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr}${multiTag}`, successBg);
       
       // pace: if we searched preflight, only sleep 180; else 300
@@ -384,7 +385,7 @@ function sendEmails() {
             const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
             successCount++;
             const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
-            // Duplicates in Gmail → lavender always
+            // Gmail duplicate → lavender always
             writeStatus(statusCell, `✅ SENT SUCCESSFULLY (${successCount}/${toSend.length}) on ${dateStr} (verified after error)${multiTag}`, "#ead1ff");
             verified = true;
           }
@@ -731,20 +732,21 @@ function setupInstructionsSheet(sheet) {
     ["✅ SENT SUCCESSFULLY (X/Y) on YYYY-MM-DD — normal success (green)"],
     ["✅ … (verified prior send) — found in Sent Mail recently; not resent (lavender)"],
     ["✅ … (verified after error) — send errored but Gmail shows it sent (lavender)"],
-    ["✅ … | MULTI-EMAIL CELL: used first; others skipped — success from a cell with multiple emails (lavender)"],
+    ["✅ … | MULTI-EMAIL CELL: used first; others skipped — success from a cell with multiple emails (peach)"],
     ["⏳ SENDING N of M… PLEASE WAIT — in progress (yellow)"],
     ["❌ FAILED: <error> — send failed (red)"],
     ["Duplicate: Previously sent — duplicate across runs/sheet (lavender)"],
     ["[SKIP] Duplicate within batch — duplicate within this run (lavender)"],
     [""],
     ["COLORS:"],
-    ["  • Success (normal): #d5f4e6"],
-    ["  • Duplicate & Multi-email success: #ead1ff (lavender)"],
-    ["  • Sending: #ffeb3b"],
-    ["  • Failed: #ffcdd2"],
+    ["  • Success (normal): #d5f4e6 (green)"],
+    ["  • Success (multi-email): #ffe0b2 (peach)"],
+    ["  • Duplicates & Gmail-verified: #ead1ff (lavender)"],
+    ["  • Sending: #ffeb3b (yellow)"],
+    ["  • Failed: #ffcdd2 (red)"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 2.6.3 | Author: Gadi Evron | Updated: 2025-08-21"]
+    ["Version: 2.6.4 | Author: Gadi Evron | Updated: 2025-08-21"]
   ];
   
   sheet.getRange(1, 1, instructions.length, 1).setValues(instructions);
