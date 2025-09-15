@@ -6,8 +6,8 @@
  * Gmail mail merge for Google Sheets.
  * 
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 2.6.6
- * @updated 2025-08-21
+ * @version 2.7
+ * @updated 2025-09-16
  * @license MIT
  * ============================================================================
  */
@@ -47,6 +47,7 @@ const PAUSE = {
 const MailMergeState = {
   draftsCache: new Map(),
   cacheTime: null,
+  expandedCache: false,
   
   refreshDrafts() {
     if (this.cacheTime && (Date.now() - this.cacheTime < 30000)) return;
@@ -62,9 +63,30 @@ const MailMergeState = {
     this.cacheTime = Date.now();
   },
   
+  expandDraftsCache() {
+    const drafts = GmailApp.getDrafts();
+    this.draftsCache.clear();
+    
+    for (let i = 0; i < Math.min(drafts.length, 50); i++) {
+      const subject = drafts[i].getMessage().getSubject().trim();
+      if (subject) this.draftsCache.set(subject, drafts[i]);
+    }
+    
+    this.expandedCache = true;
+    this.cacheTime = Date.now();
+  },
+  
   getDraft(subject) {
     this.refreshDrafts();
-    return this.draftsCache.get(subject.trim()) || null;
+    let draft = this.draftsCache.get(subject.trim());
+    
+    // If not found in first 10, try expanding to 50
+    if (!draft && !this.expandedCache) {
+      this.expandDraftsCache();
+      draft = this.draftsCache.get(subject.trim());
+    }
+    
+    return draft || null;
   }
 };
 
@@ -101,17 +123,17 @@ function personalizeText(text, name, lastName, contact = null) {
   if (!text) return '';
   
   let result = text.toString()
-    .split('{{Name}}').join(name || '')
-    .split('{{Last Name}}').join(lastName || '');
+    .replace(/\{\{name\}\}/gi, name || '')
+    .replace(/\{\{last name\}\}/gi, lastName || '');
   
   // Enhanced personalization if contact object provided
   if (contact) {
     result = result
-      .split('{{Email}}').join(contact.email || '')
-      .split('{{Company}}').join(contact.company || '')
-      .split('{{Title}}').join(contact.title || '')
-      .split('{{Custom1}}').join(contact.custom1 || '')
-      .split('{{Custom2}}').join(contact.custom2 || '');
+      .replace(/\{\{email\}\}/gi, contact.email || '')
+      .replace(/\{\{company\}\}/gi, contact.company || '')
+      .replace(/\{\{title\}\}/gi, contact.title || '')
+      .replace(/\{\{custom1\}\}/gi, contact.custom1 || '')
+      .replace(/\{\{custom2\}\}/gi, contact.custom2 || '');
   }
   
   return result;
@@ -147,6 +169,202 @@ function shouldPreflight(status) {
 }
 
 // ============================================================================
+// TEMPLATE VALIDATION FUNCTIONS
+// ============================================================================
+
+// Handle escaped tags (\\{{Name}} → literal {{Name}})
+function preprocessEscapes(text) {
+  if (!text) return {text: '', escapes: 0};
+  
+  const escapedPattern = /\\(\{\{[^}]*\}\})/g;
+  const escapes = (text.match(escapedPattern) || []).length;
+  const processed = text.replace(escapedPattern, '$1');
+  
+  return {text: processed, escapes: escapes};
+}
+
+// Text snippet generation for error context
+function getContextSnippet(text, searchTerm) {
+  const index = text.toLowerCase().indexOf(searchTerm.toLowerCase());
+  if (index === -1) return '';
+  
+  const start = Math.max(0, index - 10);
+  const end = Math.min(text.length, index + searchTerm.length + 10);
+  const snippet = text.substring(start, end);
+  
+  return `...${snippet}...`;
+}
+
+// Detect malformed tags with location context
+function detectMalformedTags(text, location) {
+  const issues = [];
+  
+  if (text.includes('{{')) {
+    const opens = (text.match(/\{\{/g) || []).length;
+    const completes = (text.match(/\{\{[^}]*\}\}/g) || []).length;
+    if (opens > completes) {
+      const snippet = getContextSnippet(text, '{{');
+      issues.push(`Malformed tag in ${location}: unmatched opening braces {{ ${snippet}`);
+    }
+  }
+  
+  if (text.includes('}}')) {
+    const closes = (text.match(/\}\}/g) || []).length;
+    const completes = (text.match(/\{\{[^}]*\}\}/g) || []).length;
+    if (closes > completes) {
+      const snippet = getContextSnippet(text, '}}');
+      issues.push(`Malformed tag in ${location}: unmatched closing braces }} ${snippet}`);
+    }
+  }
+  
+  const singleOpen = text.replace(/\{\{/g, '').includes('{');
+  const singleClose = text.replace(/\}\}/g, '').includes('}');
+  
+  if (singleOpen) {
+    const snippet = getContextSnippet(text, '{');
+    issues.push(`Malformed tag in ${location}: found single opening brace { ${snippet}`);
+  }
+  if (singleClose) {
+    const snippet = getContextSnippet(text, '}');
+    issues.push(`Malformed tag in ${location}: found single closing brace } ${snippet}`);
+  }
+  
+  return issues;
+}
+
+// Detect other tag systems with location context
+function detectOtherSystems(text, location) {
+  const found = [];
+  const otherSystemPatterns = [
+    { name: "Word Mail Merge", pattern: /<<([^>]+)>>/g },
+    { name: "Word Mail Merge", pattern: /«([^»]+)»/g },
+    { name: "Mailchimp", pattern: /\*\|([^|]+)\|\*/g },
+    { name: "Square Brackets", pattern: /\[([^\]]+)\]/g },
+    { name: "Percent Tags", pattern: /%([^%]+)%/g },
+    { name: "Dollar Tags", pattern: /\$([^$]+)\$/g }
+  ];
+  
+  otherSystemPatterns.forEach(pattern => {
+    const matches = [...text.matchAll(pattern.pattern)];
+    matches.forEach(match => {
+      found.push({ system: pattern.name, tag: match[0], content: match[1], location });
+    });
+  });
+  
+  return found;
+}
+
+// Detect unknown tags with location context and snippets
+function detectUnknownTags(text, validTags, location) {
+  const issues = [];
+  const ourSystemTags = text.match(/\{\{([^}]*)\}\}/g) || [];
+  
+  ourSystemTags.forEach(tag => {
+    const tagName = tag.slice(2, -2).trim();
+    if (tagName && !validTags.some(valid => valid.toLowerCase() === tagName.toLowerCase())) {
+      const suggestions = validTags.filter(valid => 
+        valid.toLowerCase().includes(tagName.toLowerCase()) || 
+        tagName.toLowerCase().includes(valid.toLowerCase())
+      );
+      const suggestion = suggestions.length > 0 ? ` (did you mean {{${suggestions[0]}}?)` : '';
+      const snippet = getContextSnippet(text, tag);
+      issues.push(`Unknown tag "${tag}" in ${location}: ${snippet}${suggestion}`);
+    } else if (!tagName) {
+      const snippet = getContextSnippet(text, tag);
+      issues.push(`Empty tag "${tag}" in ${location}: ${snippet}`);
+    }
+  });
+  
+  return issues;
+}
+
+// Detect missing data with location context and snippets
+function detectMissingData(text, contact, validTags, location) {
+  const issues = [];
+  const dataMap = {
+    'name': contact.name, 'last name': contact.lastName, 'email': contact.email,
+    'company': contact.company, 'title': contact.title, 'custom1': contact.custom1, 'custom2': contact.custom2
+  };
+  
+  validTags.forEach(tagName => {
+    const tagPattern = new RegExp(`\\{\\{${tagName.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}\\}\\}`, 'gi');
+    if (tagPattern.test(text)) {
+      const value = dataMap[tagName.toLowerCase()];
+      if (!value || String(value).trim() === '') {
+        const snippet = getContextSnippet(text, `{{${tagName}}}`);
+        issues.push(`Tag {{${tagName}}} in ${location}: ${snippet} - no data provided for contact`);
+      }
+    }
+  });
+  
+  return issues;
+}
+
+// Detect unbracketed tags with location context and snippets
+function detectUnbracketedTags(text, validTags, location) {
+  const issues = [];
+  
+  validTags.forEach(tagName => {
+    const escapedTag = tagName.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+    const plainTextRegex = new RegExp(`\\b${escapedTag}\\b(?![^{]*\\}\\})`, 'gi');
+    if (plainTextRegex.test(text)) {
+      const snippet = getContextSnippet(text, tagName);
+      issues.push(`Found "${tagName}" without brackets in ${location}: ${snippet} - did you mean {{${tagName}}}?`);
+    }
+  });
+  
+  return issues;
+}
+
+// Enhanced validateEmailTemplate with location context and snippets
+function validateEmailTemplate(subject, body, contact = null) {
+  const subjectProcessed = preprocessEscapes(subject || '');
+  const bodyProcessed = preprocessEscapes(body || '');
+  
+  const hardErrors = [];
+  const softWarnings = [];
+  const validTags = ['Name', 'Last Name', 'Email', 'Company', 'Title', 'Custom1', 'Custom2'];
+  
+  // 1. Detect malformed tags with location context
+  const subjectMalformed = detectMalformedTags(subjectProcessed.text, 'subject line');
+  const bodyMalformed = detectMalformedTags(bodyProcessed.text, 'email body');
+  hardErrors.push(...subjectMalformed, ...bodyMalformed);
+  
+  // 2. Detect other tag systems with location context
+  const subjectOtherTags = detectOtherSystems(subjectProcessed.text, 'subject line');
+  const bodyOtherTags = detectOtherSystems(bodyProcessed.text, 'email body');
+  [...subjectOtherTags, ...bodyOtherTags].forEach(tag => {
+    hardErrors.push(`Found ${tag.system} tag "${tag.tag}" in ${tag.location} - this system uses {{Name}}`);
+  });
+  
+  // 3. Detect unknown tags with location context and snippets
+  const subjectTags = detectUnknownTags(subjectProcessed.text, validTags, 'subject line');
+  const bodyTags = detectUnknownTags(bodyProcessed.text, validTags, 'email body');
+  hardErrors.push(...subjectTags, ...bodyTags);
+  
+  // 4. Detect missing data with location context
+  if (contact) {
+    const subjectMissing = detectMissingData(subjectProcessed.text, contact, validTags, 'subject line');
+    const bodyMissing = detectMissingData(bodyProcessed.text, contact, validTags, 'email body');
+    hardErrors.push(...subjectMissing, ...bodyMissing);
+  }
+  
+  // 5. Detect unbracketed tags with location context
+  const subjectUnbracketed = detectUnbracketedTags(subjectProcessed.text, validTags, 'subject line');
+  const bodyUnbracketed = detectUnbracketedTags(bodyProcessed.text, validTags, 'email body');
+  softWarnings.push(...subjectUnbracketed, ...bodyUnbracketed);
+  
+  return {
+    hardErrors: [...new Set(hardErrors)],
+    softWarnings: [...new Set(softWarnings)],
+    isValid: hardErrors.length === 0,
+    hasWarnings: softWarnings.length > 0,
+    hardErrorMessage: hardErrors.length > 0 ? "Template Errors:\n\n" + hardErrors.join('\n') + "\n\nPlease fix these issues before sending." : "",
+    warningMessage: softWarnings.length > 0 ? "Template Warnings:\n\n" + softWarnings.join('\n') + "\n\nContinue anyway?" : ""
+  };
+}
+
+// ============================================================================
 // CORE FUNCTIONS
 // ============================================================================
 function getContacts(sheet) {
@@ -161,13 +379,17 @@ function getContacts(sheet) {
     const row = data[i];
     const emailFieldRaw = row[2] ? row[2].toString().trim() : "";
 
+    if (!emailFieldRaw && !row[0] && !row[1]) continue;
+
     // Detect multiple emails; take first
     const emailsFound = emailFieldRaw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/ig) || [];
-    if (emailsFound.length === 0) continue;
-    const primaryEmailRaw = emailsFound[0];
+    let validEmail = null;
+    let primaryEmailRaw = null;
 
-    const validEmail = extractAndValidateEmail(primaryEmailRaw);
-    if (!validEmail) continue;
+    if (emailsFound.length > 0) {
+      primaryEmailRaw = emailsFound[0];
+      validEmail = extractAndValidateEmail(primaryEmailRaw);
+    }
     
     const contact = {
       rowNumber: i + 2,
@@ -180,7 +402,9 @@ function getContacts(sheet) {
       custom2: (row[6] || "").toString().trim(),
       status: row[7] || "",
       statusColumn: 8,
-      multiEmail: emailsFound.length > 1
+      multiEmail: emailsFound.length > 1,
+      invalidEmail: emailFieldRaw && !validEmail,
+      rawEmailField: emailFieldRaw
     };
     
     contacts.push(contact);
@@ -257,6 +481,15 @@ function sendEmails() {
     return;
   }
 
+  const validation = validateEmailTemplate(emailDraft.subject, emailDraft.body, contacts[0] || null);
+  if (!validation.isValid) {
+    ui.alert("Template Errors", validation.hardErrorMessage, ui.ButtonSet.OK);
+    return;
+  }
+  if (validation.hasWarnings && ui.alert("Template Warnings", validation.warningMessage, ui.ButtonSet.YES_NO) !== ui.Button.YES) {
+    return;
+  }
+
   // Detect truly fresh run (no statuses present at all) → no preflight on blanks
   const isFreshRun = contacts.every(c => String(c.status || "").trim() === "");
   
@@ -292,6 +525,11 @@ function sendEmails() {
     const contact = toSend[i];
     const statusCell = contactsSheet.getRange(contact.rowNumber, contact.statusColumn);
     
+    if (contact.invalidEmail) {
+      writeStatus(statusCell, `❌ INVALID EMAIL: ${contact.rawEmailField}`, "#ffcdd2");
+      continue;
+    }
+    
     // Check duplicates
     const emailLower = contact.email.toLowerCase();
 
@@ -324,12 +562,12 @@ function sendEmails() {
       // Preflight (resume-only) for blank/SENDING/FAILED
       if (!isFreshRun && shouldPreflight(contact.status)) {
         try {
-          const safeSubj = String(personalizedSubject).replace(/["“”]/g, "");
+          const safeSubj = String(personalizedSubject).replace(/["""]/g, "");
           const query = `in:sent from:me to:${contact.email} subject:"${safeSubj}" newer_than:3d`;
           didPreflightSearch = true;
           const threads = GmailApp.search(query);
           if (threads && threads.length > 0) {
-            const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+            const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd hh:mm:ss z");
             successCount++;
             const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
             // Gmail verified success → peach if multi-email else lavender
@@ -362,7 +600,7 @@ function sendEmails() {
       
       // Success status with stable date
       successCount++;
-      const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+      const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd hh:mm:ss z");
       const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
       // Normal success: multi-email gets PEACH (#ffe0b2), normal success stays GREEN
       const successBg = contact.multiEmail ? "#ffe0b2" : "#d5f4e6";
@@ -379,11 +617,11 @@ function sendEmails() {
       let verified = false;
       try {
         if (lastPersonalizedSubject) {
-          const safeSubj = String(lastPersonalizedSubject).replace(/["“”]/g, "");
+          const safeSubj = String(lastPersonalizedSubject).replace(/["""]/g, "");
           const query = `in:sent from:me to:${contact.email} subject:"${safeSubj}" newer_than:3d`;
           const threads = GmailApp.search(query);
           if (threads && threads.length > 0) {
-            const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+            const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd hh:mm:ss z");
             successCount++;
             const multiTag = contact.multiEmail ? " | MULTI-EMAIL CELL: used first; others skipped" : "";
             // Gmail verified success → peach if multi-email else lavender
@@ -430,6 +668,8 @@ function previewEmail() {
   }
   
   const sampleContact = {
+    name: CONFIG.SAMPLE.NAME,
+    lastName: CONFIG.SAMPLE.LAST_NAME,
     email: CONFIG.SAMPLE.EMAIL,
     company: CONFIG.SAMPLE.COMPANY,
     title: CONFIG.SAMPLE.TITLE,
@@ -452,6 +692,8 @@ function previewEmail() {
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
     // Quick URL formatting (most visual impact)
     .replace(/(https?:\/\/[^\s]+)/gi, '\n🔗 $1\n')
     // Simple cleanup (single pass)
@@ -460,7 +702,11 @@ function previewEmail() {
   
   const preview = `📧 To: ${CONFIG.SAMPLE.EMAIL}\n📋 Subject: ${previewSubject}\n\n${cleanBody}`;
   
-  ui.alert("Email Preview", preview, ui.ButtonSet.OK);
+  const validation = validateEmailTemplate(emailDraft.subject, emailDraft.body, sampleContact);
+  const validationSummary = validation.isValid ? "\n\n✅ Template validated" : 
+    `\n\n⚠️ Issues: ${validation.hardErrors.concat(validation.softWarnings).slice(0, 2).join('; ')}${validation.hardErrors.length + validation.softWarnings.length > 2 ? '...' : ''}`;
+  
+  ui.alert("Email Preview", preview + validationSummary, ui.ButtonSet.OK);
 }
 
 function sendPreviewTest() {
@@ -491,6 +737,8 @@ function sendPreviewTest() {
   
   try {
     const sampleContact = {
+      name: CONFIG.SAMPLE.NAME,
+      lastName: CONFIG.SAMPLE.LAST_NAME,
       email: CONFIG.SAMPLE.EMAIL,
       company: CONFIG.SAMPLE.COMPANY,
       title: CONFIG.SAMPLE.TITLE,
@@ -660,12 +908,13 @@ function setupEmailDraftSheet(sheet) {
   sheet.setColumnWidth(2, Math.max(300, sheet.getColumnWidth(2)));
 }
 
+// Complete instructions and documentation
 function setupInstructionsSheet(sheet) {
   const instructions = [
-    ["🚀 GADI'S MAIL MERGE SYSTEM - COMPLETE GUIDE"],
+    [" GADI'S MAIL MERGE SYSTEM - COMPLETE GUIDE"],
     [""],
     ["═══════════════════════════════════════════════════════════════════════"],
-    ["📋 QUICK START (4 STEPS)"],
+    [" QUICK START (4 STEPS)"],
     ["═══════════════════════════════════════════════════════════════════════"],
     ["1. Create Gmail draft with personalization tags"],
     ["2. Enter your Gmail draft subject in 'Email Draft' sheet cell B1"],
@@ -673,7 +922,7 @@ function setupInstructionsSheet(sheet) {
     ["4. Click 'Mail Merge' → 'Send Emails'"],
     [""],
     ["═══════════════════════════════════════════════════════════════════════"],
-    ["🏷️ PERSONALIZATION TAGS (Use in Gmail Draft)"],
+    [" PERSONALIZATION TAGS (Use in Gmail Draft)"],
     ["═══════════════════════════════════════════════════════════════════════"],
     ["AVAILABLE TAGS:"],
     ["  • {{Name}} - First name"],
@@ -683,6 +932,9 @@ function setupInstructionsSheet(sheet) {
     ["  • {{Title}} - Job title"],
     ["  • {{Custom1}} - Flexible field (department, location, etc.)"],
     ["  • {{Custom2}} - Second flexible field"],
+    [""],
+    ["CASE INSENSITIVE: {{Name}}, {{name}}, {{NAME}} all work!"],
+    ["ESCAPING: Use \\{{Name}} to show literal {{Name}} in emails"],
     [""],
     ["EXAMPLE GMAIL DRAFT:"],
     ["Subject: Welcome to {{Company}}, {{Name}}!"],
@@ -696,17 +948,70 @@ function setupInstructionsSheet(sheet) {
     ["The Team"],
     [""],
     ["═══════════════════════════════════════════════════════════════════════"],
-    ["📊 CONTACT SHEET FORMAT"],
+    [" CONTACT SHEET FORMAT & EMAIL EXAMPLES"],
     ["═══════════════════════════════════════════════════════════════════════"],
     ["STANDARD FORMAT (8 columns):"],
     ["  1. Name  2. Last Name  3. Email  4. Company"],
     ["  5. Title  6. Custom1  7. Custom2  8. Successfully Sent"],
     [""],
+    ["EMAIL FORMAT EXAMPLES:"],
+    ["  • Simple: john.doe@company.com"],
+    ["  • With name: John Doe <john.doe@company.com>"],
+    ["  • Display format: \"John Doe\" <john@company.com>"],
+    [""],
+    ["MULTI-EMAIL CELL HANDLING:"],
+    ["If a cell contains multiple emails separated by commas or spaces:"],
+    ["  • System automatically uses the FIRST valid email address"],
+    ["  • Other emails in the same cell are skipped"],
+    ["  • Status will show: '| MULTI-EMAIL CELL: used first; others skipped'"],
+    ["  • Example: 'john@company.com, jane@company.com' → uses john@company.com"],
+    [""],
     ["Both 'Create Merge Sheets' and 'Reset Contacts Sheet' use this format."],
     ["All personalization tags are available with this format."],
     [""],
     ["═══════════════════════════════════════════════════════════════════════"],
-    ["📎 ATTACHMENTS & ADVANCED FEATURES"],
+    [" TEMPLATE VALIDATION"],
+    ["═══════════════════════════════════════════════════════════════════════"],
+    ["Templates are validated before sending:"],
+    [""],
+    ["ERRORS (will stop sending):"],
+    ["  • Malformed tags: {{Name, Name}}, {Name}"],
+    ["  • Unknown tags: {{FirstName}}, {{Compny}}"],
+    ["  • Other tag systems: <<Name>>, [Email], %Company%"],
+    ["  • Missing data: {{Company}} when company field is empty"],
+    [""],
+    ["WARNINGS (will ask if you want to continue):"],
+    ["  • Unbracketed tags: 'Name' without brackets"],
+    [""],
+    ["ERROR MESSAGE IMPROVEMENTS:"],
+    ["Errors now include location context and text snippets:"],
+    ["  • Before: 'Unknown tag {{Compny}} found'"],
+    ["  • After: 'Unknown tag {{Compny}} in email body: ...{{Name}} at {{Compny}} for contact... (did you mean {{Company}}?)'"],
+    [""],
+    ["═══════════════════════════════════════════════════════════════════════"],
+    [" CASE INSENSITIVE & ESCAPING EXAMPLES"],
+    ["═══════════════════════════════════════════════════════════════════════"],
+    ["CASE INSENSITIVE TAG MATCHING:"],
+    ["All of these work identically:"],
+    ["  • {{Name}} - Standard format"],
+    ["  • {{name}} - Lowercase"],
+    ["  • {{NAME}} - Uppercase"],
+    ["  • {{NaMe}} - Mixed case"],
+    ["  • {{last name}} - Works for multi-word tags too"],
+    ["  • {{LAST NAME}} - Also works"],
+    [""],
+    ["ESCAPING EXAMPLES:"],
+    ["To show literal brackets in your email:"],
+    ["  • \\{{Name}} → displays as: {{Name}}"],
+    ["  • \\{{Company}} → displays as: {{Company}}"],
+    ["  • Welcome to \\{{YourCompany}} → displays as: Welcome to {{YourCompany}}"],
+    [""],
+    ["USE CASE: Documentation or examples in emails"],
+    ["'To personalize, use \\{{Name}} in your template'"],
+    ["→ displays as: 'To personalize, use {{Name}} in your template'"],
+    [""],
+    ["═══════════════════════════════════════════════════════════════════════"],
+    [" ATTACHMENTS & ADVANCED FEATURES"],
     ["═══════════════════════════════════════════════════════════════════════"],
     ["ATTACHMENTS:"],
     ["  • Attach files to your Gmail draft"],
@@ -721,14 +1026,14 @@ function setupInstructionsSheet(sheet) {
     ["  • Fill these in the 'Email Draft' sheet"],
     [""],
     ["═══════════════════════════════════════════════════════════════════════"],
-    ["⚡ STATUS LEGEND"],
+    [" STATUS LEGEND"],
     ["═══════════════════════════════════════════════════════════════════════"],
-    ["✅ SENT SUCCESSFULLY (X/Y) on YYYY-MM-DD — normal success (green)"],
-    ["✅ … (verified prior send) — found in Sent Mail recently; not resent (lavender; peach if multi-email)"],
-    ["✅ … (verified after error) — send errored but Gmail shows it sent (lavender; peach if multi-email)"],
-    ["✅ … | MULTI-EMAIL CELL: used first; others skipped — success from a cell with multiple emails (peach)"],
-    ["⏳ SENDING N of M… PLEASE WAIT — in progress (yellow)"],
-    ["❌ FAILED: <error> — send failed (red)"],
+    [" SENT SUCCESSFULLY (X/Y) on YYYY-MM-DD HH:MM:SS TZ — normal success (green)"],
+    [" … (verified prior send) — found in Sent Mail recently; not resent (lavender; peach if multi-email)"],
+    [" … (verified after error) — send errored but Gmail shows it sent (lavender; peach if multi-email)"],
+    [" … | MULTI-EMAIL CELL: used first; others skipped — success from a cell with multiple emails (peach)"],
+    [" SENDING N of M… PLEASE WAIT — in progress (yellow)"],
+    [" FAILED: <e> — send failed (red)"],
     ["Duplicate: Previously sent — duplicate across runs/sheet (lavender)"],
     ["[SKIP] Duplicate within batch — duplicate within this run (lavender)"],
     [""],
@@ -741,7 +1046,7 @@ function setupInstructionsSheet(sheet) {
     ["  • Failed: #ffcdd2 (red)"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 2.6.6 | Author: Gadi Evron | Updated: 2025-08-21"]
+    ["Version: 2.7.0 | Author: Gadi Evron | Updated: 2025-09-14"]
   ];
   
   sheet.getRange(1, 1, instructions.length, 1).setValues(instructions);
