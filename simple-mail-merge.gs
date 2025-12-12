@@ -6,8 +6,8 @@
  * Gmail mail merge for Google Sheets.
  *
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 3.3
- * @updated 2025-11-18
+ * @version 3.4
+ * @updated 2025-12-12
  * @license MIT
  * ============================================================================
  */
@@ -1638,7 +1638,7 @@ function setupInstructionsSheet(sheet) {
     ["═══════════════════════════════════════════════════════════════════════"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 3.3 | Author: Gadi Evron | Updated: 2025-11-18"],
+    ["Version: 3.4 | Author: Gadi Evron | Updated: 2025-12-12"],
     [""],
   ];
 
