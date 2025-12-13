@@ -7,7 +7,7 @@
  *
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
  * @version 3.4
- * @updated 2025-12-12
+ * @updated 2025-12-13
  * @license MIT
  * ============================================================================
  */
@@ -199,7 +199,6 @@ function _updateSuccessStatus({statusCell, successCount, totalCount, contact, me
 // ============================================================================
 // REPLY MODE HELPER FUNCTIONS
 // ============================================================================
-
 /**
  * Sanitize Gmail search input to prevent query injection
  * @private
@@ -280,7 +279,6 @@ function findThreadForReply(originalSubject, searchType, contactEmail) {
   }
 }
 
-
 // ============================================================================
 // TEMPLATE VALIDATION FUNCTIONS
 // ============================================================================
@@ -305,7 +303,8 @@ function getContextSnippet(text, searchTerm) {
   const end = Math.min(text.length, index + searchTerm.length + 10);
   const snippet = text.substring(start, end);
 
-  return `...${snippet}...`;
+  // ASCII-only to avoid encoding/token issues
+  return '...' + snippet + '...';
 }
 
 // Detect malformed tags with location context
@@ -815,8 +814,8 @@ function _previewNewEmailMode({draftSheet, ui, sampleContact}) {
     .replace(/&gt;/g, '>')
     .replace(/&#39;/g, "'")
     .replace(/&quot;/g, '"')
-    // Quick URL formatting (most visual impact)
-    .replace(/(https?:\/\/[^\s]+)/gi, '\n🔗 $1\n')
+    // Quick URL formatting (most visual impact) — ASCII only
+    .replace(/(https?:\/\/[^\s]+)/gi, '\nLink: $1\n')
     // Simple cleanup (single pass)
     .replace(/\n{3,}/g, '\n\n')
     .replace(/^\s+|\s+$/g, '');
@@ -1101,7 +1100,7 @@ function _sendNewEmailMode({contact, emailDraft, contactsSheet, statusCell, toSe
             emailAdded: contact.email.toLowerCase(),
             statusUpdate: {
               cell: statusCell,
-              message: `✅ SENT SUCCESSFULLY (${successCount + 1}/${toSendLength}) on ${dateStr} (verified after error)${multiTag}`,
+              message: `✅ SENT SUCCESSFULLLY (${successCount + 1}/${toSendLength}) on ${dateStr} (verified after error)${multiTag}`,
               bgColor: successBgPostError
             },
             verified: true
@@ -1638,7 +1637,7 @@ function setupInstructionsSheet(sheet) {
     ["═══════════════════════════════════════════════════════════════════════"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 3.4 | Author: Gadi Evron | Updated: 2025-12-12"],
+    ["Version: 3.5 | Author: Gadi Evron | Updated: 2025-12-13"],
     [""],
   ];
 
