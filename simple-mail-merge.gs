@@ -6,8 +6,8 @@
  * Gmail mail merge for Google Sheets.
  *
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 3.4
- * @updated 2025-12-13
+ * @version 3.6
+ * @updated 2025-12-14
  * @license MIT
  * ============================================================================
  */
@@ -171,6 +171,46 @@ function writeStatus(statusCell, value, bg) {
 function shouldPreflight(status) {
   const s = String(status || "").toUpperCase();
   return s === "" || s.includes("SENDING") || s.includes("FAILED");
+}
+
+/**
+ * Extract the full sentence that contains a match index.
+ * Works on raw Gmail HTML body but returns a cleaned, readable sentence.
+ */
+function extractFullSentence(text, index) {
+  if (!text || index == null) return "";
+
+  const t = String(text);
+
+  const lastDot = t.lastIndexOf('.', index);
+  const lastBang = t.lastIndexOf('!', index);
+  const lastQ = t.lastIndexOf('?', index);
+  const start = Math.max(lastDot, lastBang, lastQ) + 1;
+
+  const nextDot = t.indexOf('.', index);
+  const nextBang = t.indexOf('!', index);
+  const nextQ = t.indexOf('?', index);
+
+  const endCandidates = [nextDot, nextBang, nextQ].filter(i => i !== -1);
+  const end = endCandidates.length ? Math.min(...endCandidates) + 1 : t.length;
+
+  let sentence = t.substring(start, end).trim();
+
+  // Clean HTML → readable text (keep minimal; do not change validation logic)
+  sentence = sentence
+    .replace(/<\/(p|div|li|h[1-6])>/gi, '. ')
+    .replace(/<br\s*\/?>/gi, '. ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return sentence;
 }
 
 /**
@@ -359,7 +399,8 @@ function detectOtherSystems(text, location) {
   otherSystemPatterns.forEach(pattern => {
     const matches = [...text.matchAll(pattern.pattern)];
     matches.forEach(match => {
-      found.push({ system: pattern.name, tag: match[0], content: match[1], location });
+      const sentence = extractFullSentence(text, match.index);
+      found.push({ system: pattern.name, tag: match[0], content: match[1], location, sentence });
     });
   });
 
@@ -419,10 +460,15 @@ function detectUnbracketedTags(text, validTags, location) {
   validTags.forEach(tagName => {
     const escapedTag = tagName.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
     const plainTextRegex = new RegExp(`\\b${escapedTag}\\b(?![^{]*\\}\\})`, 'gi');
-    if (plainTextRegex.test(text)) {
-      const snippet = getContextSnippet(text, tagName);
-      issues.push(`Found "${tagName}" without brackets in ${location}: ${snippet} - did you mean {{${tagName}}}?`);
+
+    const m = plainTextRegex.exec(text);
+    if (m) {
+      const sentence = extractFullSentence(text, m.index);
+      issues.push(`Field name used in text ("${tagName}")\n\nSentence:\n"${sentence}"`);
     }
+
+    // Reset regex state (defensive; we only want the first hit per tag)
+    plainTextRegex.lastIndex = 0;
   });
 
   return issues;
@@ -446,7 +492,8 @@ function validateEmailTemplate(subject, body, contact = null) {
   const subjectOtherTags = detectOtherSystems(subjectProcessed.text, 'subject line');
   const bodyOtherTags = detectOtherSystems(bodyProcessed.text, 'email body');
   [...subjectOtherTags, ...bodyOtherTags].forEach(tag => {
-    hardErrors.push(`Found ${tag.system} tag "${tag.tag}" in ${tag.location} - this system uses {{Name}}`);
+    const title = (tag.system === "Square Brackets") ? "Square brackets found" : `${tag.system} found`;
+    softWarnings.push(`${title}\n\nSentence:\n"${tag.sentence || ''}"`);
   });
 
   // 3. Detect unknown tags with location context and snippets
@@ -1544,7 +1591,7 @@ function setupInstructionsSheet(sheet) {
     ["  4. If 2+ threads found: Status shows '⚠️ Multiple threads' - skips (too ambiguous)"],
     [""],
     ["QUICK START:"],
-    ["  1. Keep ROW 9 as 'New Email' to send regular emails (default)"],
+    ["  1. Keep ROW 9 as 'New Email' to send regular new emails (default)"],
     ["  2. To reply to threads:"],
     ["     a. Change ROW 9 to 'Reply: TO Mode' or 'Reply: BCC Mode'"],
     ["     b. Fill ROW 11 with the thread subject to search for"],
@@ -1637,7 +1684,7 @@ function setupInstructionsSheet(sheet) {
     ["═══════════════════════════════════════════════════════════════════════"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 3.5 | Author: Gadi Evron | Updated: 2025-12-13"],
+    ["Version: 3.6 | Author: Gadi Evron | Updated: 2025-12-14"],
     [""],
   ];
 
