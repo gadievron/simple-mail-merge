@@ -6,8 +6,8 @@
  * Gmail mail merge for Google Sheets.
  *
  * @author Gadi Evron (with Claude, and some help from ChatGPT)
- * @version 3.6
- * @updated 2025-12-14
+ * @version 3.7
+ * @updated 2025-01-07
  * @license MIT
  * ============================================================================
  */
@@ -584,10 +584,164 @@ function getEmailDraft(sheet) {
   const draft = MailMergeState.getDraft(subjectStr);
   if (!draft) return null;
 
+  const message = draft.getMessage();
+  const htmlBody = message.getBody();
+
+  // =========================================================================
+  // INLINE IMAGES HANDLING
+  // Based on Google's official mail merge solution, with enhancements for:
+  // - Duplicate filename handling
+  // - Missing alt attribute fallback
+  // https://developers.google.com/apps-script/samples/automations/mail-merge
+  // =========================================================================
+  
+  // Get ONLY inline images (not regular attachments)
+  const allInlineImages = message.getAttachments({
+    includeInlineImages: true,
+    includeAttachments: false
+  });
+  
+  // Get ONLY regular attachments (not inline images)
+  const attachments = message.getAttachments({
+    includeInlineImages: false
+  });
+  
+  // Build the inlineImages object mapping cid -> blob
+  const inlineImagesObj = {};
+  
+  if (allInlineImages.length > 0) {
+    // Step 1: Build filename -> blob map, tracking duplicates
+    // Also build reverse map: blob -> array index (for tracking used blobs)
+    const imgByName = {};
+    const duplicateNames = new Set();
+    const blobToIndex = new Map();
+    
+    allInlineImages.forEach((img, index) => {
+      const name = img.getName();
+      blobToIndex.set(img, index);
+      
+      // Skip images with no filename (shouldn't happen, but defensive)
+      if (!name) return;
+      
+      if (imgByName[name]) {
+        duplicateNames.add(name);
+        // Find next available index suffix
+        let idx = 1;
+        while (imgByName[name + '__' + idx]) idx++;
+        imgByName[name + '__' + idx] = img;
+      } else {
+        imgByName[name] = img;
+      }
+    });
+    
+    // Also keep a simple ordered array for fallback matching
+    const imgArray = [...allInlineImages];
+    const usedIndices = new Set();  // Track which blob indices have been assigned
+    
+    // Helper to mark a blob as used
+    const markBlobUsed = (blob) => {
+      const idx = blobToIndex.get(blob);
+      if (idx !== undefined) usedIndices.add(idx);
+    };
+    
+    // Step 2: Find all img tags with cid: sources
+    // Flexible regex handles any attribute order and both quote styles
+    const imgTagPattern = /<img[^>]+src=["']cid:([^"']+)["'][^>]*>/gi;
+    const imgTags = [...htmlBody.matchAll(imgTagPattern)];
+    
+    // Track which filenames we've used (for duplicate handling)
+    const usedFilenames = {};
+    
+    imgTags.forEach((tagMatch, tagIndex) => {
+      const cid = tagMatch[1];
+      const fullTag = tagMatch[0];
+      
+      // Already mapped this CID? Skip
+      if (inlineImagesObj[cid]) return;
+      
+      // =====================================================================
+      // Method 1: Match by alt attribute (Google's standard method)
+      // Gmail stores filename in alt attribute: alt="myimage.png"
+      // =====================================================================
+      const altMatch = fullTag.match(/alt=["']([^"']*)["']/i);
+      const altFilename = altMatch ? altMatch[1] : null;
+      
+      if (altFilename && imgByName[altFilename]) {
+        // Check if this is a duplicate filename situation
+        if (duplicateNames.has(altFilename)) {
+          // Use indexed version based on order of appearance
+          const useCount = usedFilenames[altFilename] || 0;
+          const keyToUse = useCount === 0 ? altFilename : altFilename + '__' + useCount;
+          if (imgByName[keyToUse]) {
+            inlineImagesObj[cid] = imgByName[keyToUse];
+            markBlobUsed(imgByName[keyToUse]);
+            usedFilenames[altFilename] = useCount + 1;
+            return;
+          }
+        } else {
+          // Simple case: unique filename
+          inlineImagesObj[cid] = imgByName[altFilename];
+          markBlobUsed(imgByName[altFilename]);
+          return;
+        }
+      }
+      
+      // =====================================================================
+      // Method 2: Match CID pattern to filename (handles missing alt)
+      // Gmail CIDs sometimes contain filename hints: ii_logo123, ii_header456
+      // Only use if filename is long enough to avoid false positives
+      // =====================================================================
+      const MIN_MATCH_LENGTH = 4;  // Minimum chars to match to avoid false positives
+      for (const [name, blob] of Object.entries(imgByName)) {
+        if (name.includes('__')) continue; // Skip indexed duplicates
+        if (usedIndices.has(blobToIndex.get(blob))) continue; // Skip already used
+        
+        const baseName = name.replace(/\.[^.]+$/, ''); // Remove extension
+        if (baseName.length >= MIN_MATCH_LENGTH) {
+          const matchPortion = baseName.toLowerCase().substring(0, 8);
+          if (cid.toLowerCase().includes(matchPortion)) {
+            inlineImagesObj[cid] = blob;
+            markBlobUsed(blob);
+            return;
+          }
+        }
+      }
+      
+      // =====================================================================
+      // Method 3: Order-based matching (when counts match)
+      // If same number of CIDs as images, match by position
+      // Note: Gmail returns attachments in INSERT order, not appearance order,
+      // but this is still better than nothing when other methods fail
+      // =====================================================================
+      if (imgTags.length === allInlineImages.length && !usedIndices.has(tagIndex)) {
+        const blob = imgArray[tagIndex];
+        if (blob && !Object.values(inlineImagesObj).includes(blob)) {
+          inlineImagesObj[cid] = blob;
+          markBlobUsed(blob);
+          return;
+        }
+      }
+      
+      // =====================================================================
+      // Method 4: Last resort - assign any unused blob
+      // Better to show a potentially wrong image than a broken image icon
+      // =====================================================================
+      for (let i = 0; i < imgArray.length; i++) {
+        if (!usedIndices.has(i)) {
+          const blob = imgArray[i];
+          inlineImagesObj[cid] = blob;
+          markBlobUsed(blob);
+          return;
+        }
+      }
+    });
+  }
+
   const result = {
     subject: subjectStr,
-    body: draft.getMessage().getBody(),
-    attachments: draft.getMessage().getAttachments()
+    body: htmlBody,
+    attachments: attachments,
+    inlineImages: Object.keys(inlineImagesObj).length > 0 ? inlineImagesObj : null
   };
 
   // Check for additional recipient fields (only if they exist)
@@ -680,6 +834,9 @@ function sendEmails() {
   const isFreshRun = contacts.every(c => String(c.status || "").trim() === "");
 
   const toSend = contacts.filter(c => {
+    // Must have a valid email
+    if (!c.email) return false;
+    // Must not already be sent
     const s = (c.status || "").toString().toUpperCase();
     return !s.includes("SENT SUCCESSFULLY");
   });
@@ -692,7 +849,13 @@ function sendEmails() {
   );
 
   if (toSend.length === 0) {
-    ui.alert("Complete", "All emails already sent!", ui.ButtonSet.OK);
+    // Check why no emails to send
+    const validContacts = contacts.filter(c => c.email);
+    if (validContacts.length === 0) {
+      ui.alert("Error", "No valid email addresses found. Check the Contacts sheet.", ui.ButtonSet.OK);
+    } else {
+      ui.alert("Complete", "All emails already sent!", ui.ButtonSet.OK);
+    }
     return;
   }
 
@@ -705,6 +868,14 @@ function sendEmails() {
     return;
   }
 
+  // Mark invalid emails AFTER confirmation (so we don't modify sheet if user cancels)
+  contacts.forEach(c => {
+    if (c.invalidEmail) {
+      const statusCell = contactsSheet.getRange(c.rowNumber, c.statusColumn);
+      writeStatus(statusCell, `❌ INVALID EMAIL: ${c.rawEmailField}`, "#ffcdd2");
+    }
+  });
+
   // Make sure we're viewing the Contacts sheet so user can see updates
   SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(contactsSheet);
 
@@ -715,11 +886,6 @@ function sendEmails() {
   for (let i = 0; i < toSend.length; i++) {
     const contact = toSend[i];
     const statusCell = contactsSheet.getRange(contact.rowNumber, contact.statusColumn);
-
-    if (contact.invalidEmail) {
-      writeStatus(statusCell, `❌ INVALID EMAIL: ${contact.rawEmailField}`, "#ffcdd2");
-      continue;
-    }
 
     // Check duplicates
     const emailLower = contact.email.toLowerCase();
@@ -844,8 +1010,8 @@ function _previewNewEmailMode({draftSheet, ui, sampleContact}) {
     return;
   }
 
-  const previewSubject = personalizeText(emailDraft.subject, sampleContact.name, sampleContact.lastName, sampleContact);
-  const previewBody = personalizeText(emailDraft.body, sampleContact.name, sampleContact.lastName, sampleContact);
+  const previewSubject = personalizeText(emailDraft.subject, sampleContact.NAME, sampleContact.LAST_NAME, sampleContact);
+  const previewBody = personalizeText(emailDraft.body, sampleContact.NAME, sampleContact.LAST_NAME, sampleContact);
 
   // Fast basic HTML rendering - prioritizes speed over complex formatting
   let cleanBody = previewBody
@@ -867,13 +1033,16 @@ function _previewNewEmailMode({draftSheet, ui, sampleContact}) {
     .replace(/\n{3,}/g, '\n\n')
     .replace(/^\s+|\s+$/g, '');
 
-  const preview = `📧 To: ${sampleContact.email}\n📋 Subject: ${previewSubject}\n\n${cleanBody}`;
+  const preview = `📧 To: ${sampleContact.EMAIL}\n📋 Subject: ${previewSubject}\n\n${cleanBody}`;
 
   const validation = validateEmailTemplate(emailDraft.subject, emailDraft.body, sampleContact);
   const validationSummary = validation.isValid ? "\n\n✅ Template validated" :
     `\n\n⚠️ Issues: ${validation.hardErrors.concat(validation.softWarnings).slice(0, 2).join('; ')}${validation.hardErrors.length + validation.softWarnings.length > 2 ? '...' : ''}`;
 
-  ui.alert("Email Preview", preview + validationSummary, ui.ButtonSet.OK);
+  // Note about inline images
+  const inlineImageNote = emailDraft.inlineImages ? `\n\n📎 Contains ${Object.keys(emailDraft.inlineImages).length} inline image(s)` : '';
+
+  ui.alert("Email Preview", preview + validationSummary + inlineImageNote, ui.ButtonSet.OK);
 }
 
 /**
@@ -978,6 +1147,9 @@ function _sendTestNewEmailMode({draftSheet, ui}) {
     }
     if (emailDraft.attachments && emailDraft.attachments.length > 0) {
       emailOptions.attachments = emailDraft.attachments;
+    }
+    if (emailDraft.inlineImages) {
+      emailOptions.inlineImages = emailDraft.inlineImages;
     }
 
     GmailApp.sendEmail(validTestEmail, personalizedSubject, "", emailOptions);
@@ -1105,7 +1277,12 @@ function _sendNewEmailMode({contact, emailDraft, contactsSheet, statusCell, toSe
     // Prepare email options
     const emailOptions = { htmlBody: personalizedBody };
     if (emailDraft.senderName) emailOptions.name = emailDraft.senderName;
-    if (emailDraft.attachments && emailDraft.attachments.length > 0) emailOptions.attachments = emailDraft.attachments;
+    if (emailDraft.attachments && emailDraft.attachments.length > 0) {
+      emailOptions.attachments = emailDraft.attachments;
+    }
+    if (emailDraft.inlineImages) {
+      emailOptions.inlineImages = emailDraft.inlineImages;
+    }
     if (emailDraft.cc) emailOptions.cc = emailDraft.cc;
     if (emailDraft.bcc) emailOptions.bcc = emailDraft.bcc;
 
@@ -1147,7 +1324,7 @@ function _sendNewEmailMode({contact, emailDraft, contactsSheet, statusCell, toSe
             emailAdded: contact.email.toLowerCase(),
             statusUpdate: {
               cell: statusCell,
-              message: `✅ SENT SUCCESSFULLLY (${successCount + 1}/${toSendLength}) on ${dateStr} (verified after error)${multiTag}`,
+              message: `✅ SENT SUCCESSFULLY (${successCount + 1}/${toSendLength}) on ${dateStr} (verified after error)${multiTag}`,
               bgColor: successBgPostError
             },
             verified: true
@@ -1242,6 +1419,11 @@ function _sendReplyMode({contact, emailDraft, contactsSheet, statusCell, toSendL
     // 1 thread found - reply to it
     const personalizedBody = personalizeText(emailDraft.body, contact.name, contact.lastName, contact);
     const replyOptions = { htmlBody: personalizedBody };
+
+    // Add inline images if present
+    if (emailDraft.inlineImages) {
+      replyOptions.inlineImages = emailDraft.inlineImages;
+    }
 
     // Add CC/BCC if requested
     if (emailDraft.includeRecipients) {
@@ -1494,6 +1676,21 @@ function setupInstructionsSheet(sheet) {
     ["The Team"],
     [""],
     ["═══════════════════════════════════════════════════════════════════════"],
+    [" INLINE IMAGES"],
+    ["═══════════════════════════════════════════════════════════════════════"],
+    ["Images embedded in your Gmail draft (not as attachments) will display"],
+    ["inline in the sent emails. This is useful for:"],
+    ["  • Company logos / letterheads"],
+    ["  • Product images"],
+    ["  • Signatures with images"],
+    [""],
+    ["Simply insert images directly into your Gmail draft body."],
+    ["They will be sent as inline images, not as separate attachments."],
+    [""],
+    ["ADVANCED: The system handles duplicate filenames and images without"],
+    ["alt text through multiple fallback matching methods."],
+    [""],
+    ["═══════════════════════════════════════════════════════════════════════"],
     [" CONTACT SHEET FORMAT & EMAIL EXAMPLES"],
     ["═══════════════════════════════════════════════════════════════════════"],
     ["STANDARD FORMAT (8 columns):"],
@@ -1684,7 +1881,7 @@ function setupInstructionsSheet(sheet) {
     ["═══════════════════════════════════════════════════════════════════════"],
     [""],
     ["════════════════════════════════════════════════════════════════════════"],
-    ["Version: 3.6 | Author: Gadi Evron | Updated: 2025-12-14"],
+    ["Version: 3.7 | Author: Gadi Evron | Updated: 2025-01-07"],
     [""],
   ];
 
